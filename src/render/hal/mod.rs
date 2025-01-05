@@ -1,6 +1,8 @@
 use std::fmt;
 use std::fmt::{Debug, Display};
 
+use winit::window::Window;
+
 pub mod vulkan;
 
 #[derive(Debug)]
@@ -22,10 +24,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct RendererCreateInfo {
-    pub title: String,
-    pub window_size: (u32, u32),
-}
-pub trait Renderer {
-    fn new(info: &RendererCreateInfo) -> Result<Box<Self>>;
+pub struct RendererCreateInfo {}
+pub trait Renderer<'w> {
+    fn new(window: &'w Window, info: &RendererCreateInfo) -> Result<Box<Self>>;
 }
