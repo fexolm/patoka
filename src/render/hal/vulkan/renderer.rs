@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::ffi;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void, CStr};
 
 use ash::{Device, Entry, Instance, vk};
 use ash::ext::debug_utils;
@@ -15,21 +15,25 @@ use crate::render::hal::{Error, RendererCreateInfo, Result};
 pub struct VulkanRenderer<'w> {
     pub(crate) entry: Entry,
     pub(crate) instance: Instance,
-    pub(crate) device: Device,
-    pub(crate) surface_loader: surface::Instance,
-    pub(crate) swapchain_loader: swapchain::Device,
     pub(crate) debug_utils_loader: debug_utils::Instance,
     pub(crate) debug_callback: vk::DebugUtilsMessengerEXT,
 
     pub(crate) physical_device: vk::PhysicalDevice,
-    pub(crate) queue_family_index: u32,
-    pub(crate) present_queue: vk::Queue,
 
+    pub(crate) present_family_idx: u32,
+    pub(crate) graphics_family_idx: u32,
+    pub(crate) present_queue: vk::Queue,
+    pub(crate) graphics_queue: vk::Queue,
+
+    pub(crate) surface_loader: surface::Instance,
     pub(crate) surface: vk::SurfaceKHR,
     pub(crate) surface_format: vk::SurfaceFormatKHR,
     pub(crate) surface_resolution: vk::Extent2D,
 
+    pub(crate) swapchain_loader: swapchain::Device,
     pub(crate) swapchain: vk::SwapchainKHR,
+
+    pub(crate) device: Device,
 
     window: &'w Window,
 }
@@ -97,6 +101,103 @@ unsafe extern "system" fn vulkan_debug_callback(
     vk::FALSE
 }
 
+struct SelectedPhysicalDevice {
+    physical_device: vk::PhysicalDevice,
+    graphics_family_idx: u32,
+    present_family_idx: u32,
+}
+
+fn get_required_device_extensions() -> [&'static CStr; 1] {
+    [swapchain::NAME]
+}
+
+fn check_required_extensions(instance: &Instance, device: vk::PhysicalDevice) -> bool {
+    let required_extentions = get_required_device_extensions();
+
+    let extension_props = unsafe {
+        instance
+            .enumerate_device_extension_properties(device)
+            .unwrap()
+    };
+
+    for required in required_extentions.iter() {
+        let found = extension_props.iter().any(|ext| {
+            let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+            required == &name
+        });
+
+        if !found {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn check_required_features(instance: &Instance, device: vk::PhysicalDevice) -> bool {
+    let features = unsafe { instance.get_physical_device_features(device) };
+    let mut features2 = vk::PhysicalDeviceFeatures2::default();
+    let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
+    features2.p_next = &mut features12 as *mut _ as *mut c_void;
+    features12.p_next = &mut features13 as *mut _ as *mut c_void;
+
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    features.sampler_anisotropy == vk::TRUE
+        && features12.buffer_device_address == vk::TRUE
+        && features12.descriptor_indexing == vk::TRUE
+        && features13.dynamic_rendering == vk::TRUE
+        && features13.synchronization2 == vk::TRUE
+}
+
+unsafe fn find_queue_families(instance: &Instance, surface_loader: &surface::Instance, surface: vk::SurfaceKHR, device: vk::PhysicalDevice) -> Option<(u32, u32)> {
+    unsafe {
+        let props = instance.get_physical_device_queue_family_properties(device);
+
+        let (mut graphics, mut present) = (None, None);
+
+        for (idx, family) in props.iter().enumerate() {
+            let idx = idx as u32;
+
+            if graphics.is_none() && family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                graphics = Some(idx);
+                continue;
+            }
+
+            let present_support = surface_loader.get_physical_device_surface_support(device, idx, surface).unwrap();
+
+            if present.is_none() && present_support {
+                present = Some(idx);
+            }
+        }
+
+        if let (Some(g), Some(p)) = (graphics, present) {
+            Some((g, p))
+        } else {
+            None
+        }
+    }
+}
+unsafe fn select_physical_device(instance: &Instance, surface_loader: &surface::Instance, surface: vk::SurfaceKHR) -> Result<SelectedPhysicalDevice> {
+    let devices = instance
+        .enumerate_physical_devices()?;
+
+    Ok(devices
+        .iter()
+        .find_map(|&physical_device| {
+            if !check_required_extensions(instance, physical_device) || !check_required_features(instance, physical_device) {
+                return None;
+            }
+
+            if let Some((graphics_family_idx, present_family_idx)) = find_queue_families(instance, surface_loader, surface, physical_device) {
+                Some(SelectedPhysicalDevice { physical_device, graphics_family_idx, present_family_idx })
+            } else {
+                None
+            }
+        }).expect("Couldn't find suitable device."))
+}
+
 impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
     fn new(window: &'w Window, info: &RendererCreateInfo) -> Result<Box<Self>> {
         unsafe {
@@ -146,35 +247,7 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
 
             let surface_loader = surface::Instance::new(&entry, &instance);
 
-            let pdevices = instance
-                .enumerate_physical_devices()?;
-
-            let (physical_device, queue_family_index) = pdevices
-                .iter()
-                .find_map(|pdevice| {
-                    instance
-                        .get_physical_device_queue_family_properties(*pdevice)
-                        .iter()
-                        .enumerate()
-                        .find_map(|(index, info)| {
-                            let supports_graphic_and_surface =
-                                info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-                                    && surface_loader
-                                    .get_physical_device_surface_support(
-                                        *pdevice,
-                                        index as u32,
-                                        surface,
-                                    )
-                                    .unwrap();
-                            if supports_graphic_and_surface {
-                                Some((*pdevice, index))
-                            } else {
-                                None
-                            }
-                        })
-                }).expect("Couldn't find suitable device.");
-
-            let queue_family_index = queue_family_index as u32;
+            let SelectedPhysicalDevice { physical_device, graphics_family_idx, present_family_idx } = select_physical_device(&instance, &surface_loader, surface)?;
 
             let device_extension_names_raw = [
                 swapchain::NAME.as_ptr(),
@@ -187,12 +260,13 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
 
             let priorities = [1.0];
 
-            let queue_info = vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(queue_family_index)
-                .queue_priorities(&priorities);
+            let queue_infos: Vec<_> = [graphics_family_idx, present_family_idx].iter().map(|&idx| vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(idx)
+                .queue_priorities(&priorities)
+            ).collect();
 
             let device_create_info = vk::DeviceCreateInfo::default()
-                .queue_create_infos(std::slice::from_ref(&queue_info))
+                .queue_create_infos(&queue_infos)
                 .enabled_extension_names(&device_extension_names_raw)
                 .enabled_features(&features);
 
@@ -200,7 +274,8 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
                 .create_device(physical_device, &device_create_info, None)
                 .unwrap();
 
-            let present_queue = device.get_device_queue(queue_family_index, 0);
+            let present_queue = device.get_device_queue(present_family_idx, 0);
+            let graphics_queue = device.get_device_queue(graphics_family_idx, 0);
 
             let surface_format = surface_loader
                 .get_physical_device_surface_formats(physical_device, surface)
@@ -232,14 +307,17 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
             } else {
                 surface_capabilities.current_transform
             };
+
             let present_modes = surface_loader
                 .get_physical_device_surface_present_modes(physical_device, surface)
                 .unwrap();
+
             let present_mode = present_modes
                 .iter()
                 .cloned()
                 .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
                 .unwrap_or(vk::PresentModeKHR::FIFO);
+
             let swapchain_loader = swapchain::Device::new(&instance, &device);
 
             let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
@@ -269,8 +347,10 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
                 debug_utils_loader,
                 debug_callback,
                 physical_device,
-                queue_family_index,
+                present_family_idx,
+                graphics_family_idx,
                 present_queue,
+                graphics_queue,
                 surface,
                 surface_format,
                 surface_resolution,
