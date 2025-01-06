@@ -27,8 +27,6 @@ pub struct VulkanRenderer<'w> {
 
     pub(crate) surface_loader: surface::Instance,
     pub(crate) surface: vk::SurfaceKHR,
-    pub(crate) surface_format: vk::SurfaceFormatKHR,
-    pub(crate) surface_resolution: vk::Extent2D,
 
     pub(crate) swapchain_loader: swapchain::Device,
     pub(crate) swapchain: vk::SwapchainKHR,
@@ -277,60 +275,22 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
             let present_queue = device.get_device_queue(present_family_idx, 0);
             let graphics_queue = device.get_device_queue(graphics_family_idx, 0);
 
-            let surface_format = surface_loader
-                .get_physical_device_surface_formats(physical_device, surface)
-                .unwrap()[0];
-
-            let surface_capabilities = surface_loader
-                .get_physical_device_surface_capabilities(physical_device, surface)
-                .unwrap();
-            let mut desired_image_count = surface_capabilities.min_image_count + 1;
-            if surface_capabilities.max_image_count > 0
-                && desired_image_count > surface_capabilities.max_image_count
-            {
-                desired_image_count = surface_capabilities.max_image_count;
-            }
-
-            let surface_resolution = match surface_capabilities.current_extent.width {
-                u32::MAX => vk::Extent2D {
-                    width: window.inner_size().width,
-                    height: window.inner_size().height,
-                },
-                _ => surface_capabilities.current_extent,
-            };
-
-            let pre_transform = if surface_capabilities
-                .supported_transforms
-                .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            {
-                vk::SurfaceTransformFlagsKHR::IDENTITY
-            } else {
-                surface_capabilities.current_transform
-            };
-
-            let present_modes = surface_loader
-                .get_physical_device_surface_present_modes(physical_device, surface)
-                .unwrap();
-
-            let present_mode = present_modes
-                .iter()
-                .cloned()
-                .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
-                .unwrap_or(vk::PresentModeKHR::FIFO);
-
             let swapchain_loader = swapchain::Device::new(&instance, &device);
 
             let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
                 .surface(surface)
-                .min_image_count(desired_image_count)
-                .image_color_space(surface_format.color_space)
-                .image_format(surface_format.format)
-                .image_extent(surface_resolution)
+                .min_image_count(3)
+                .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+                .image_format(vk::Format::B8G8R8A8_UNORM)
+                .image_extent(vk::Extent2D {
+                    width: window.inner_size().width,
+                    height: window.inner_size().height,
+                })
                 .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .pre_transform(pre_transform)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(present_mode)
+                .present_mode(vk::PresentModeKHR::FIFO)
+                .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
                 .clipped(true)
                 .image_array_layers(1);
 
@@ -352,8 +312,6 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
                 present_queue,
                 graphics_queue,
                 surface,
-                surface_format,
-                surface_resolution,
                 swapchain,
                 window,
             }))
