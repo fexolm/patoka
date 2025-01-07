@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::ffi;
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::Arc;
 
 use ash::{Device, Entry, Instance, vk};
 use ash::ext::debug_utils;
@@ -9,11 +10,10 @@ use winit::error::OsError;
 use winit::raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
-use crate::render::hal;
-use crate::render::hal::{CommandList, CommandListCreateInfo, Error, RendererCreateInfo, Result};
+use crate::render::hal::{CommandListCreateInfo, Error, RendererCreateInfo, Result};
 use crate::render::hal::vulkan::command_list::VulkanCommandList;
 
-pub struct VulkanRenderer<'w> {
+pub struct VulkanRenderer {
     pub(crate) entry: Entry,
     pub(crate) instance: Instance,
     pub(crate) debug_utils_loader: debug_utils::Instance,
@@ -38,7 +38,7 @@ pub struct VulkanRenderer<'w> {
 
     pub(crate) command_pool: vk::CommandPool,
 
-    window: &'w Window,
+    window: Arc<Window>,
 
     frame_number: usize,
 }
@@ -243,8 +243,8 @@ fn create_image_view(
     unsafe { Ok(device.create_image_view(&create_info, None)?) }
 }
 
-impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
-    fn new(window: &'w Window, info: &RendererCreateInfo) -> Result<Box<Self>> {
+impl VulkanRenderer {
+    pub fn new(window: Arc<Window>, info: &RendererCreateInfo) -> Result<Arc<Self>> {
         unsafe {
             let entry = Entry::linked();
 
@@ -360,7 +360,7 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
                 device.create_command_pool(&create_info, None)?
             };
 
-            Ok(Box::new(Self {
+            Ok(Arc::new(Self {
                 entry,
                 instance,
                 device,
@@ -384,12 +384,12 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
         }
     }
 
-    fn create_command_list<'r>(&'r self, create_info: &CommandListCreateInfo) -> Box<dyn CommandList + 'r> {
-        VulkanCommandList::new(self, create_info)
+    pub fn create_command_list(self: &Arc<Self>, create_info: &CommandListCreateInfo) -> VulkanCommandList {
+        VulkanCommandList::new(self.clone(), create_info)
     }
 }
 
-impl<'w> Drop for VulkanRenderer<'w> {
+impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
