@@ -653,6 +653,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "ash-window",
+ "bitflags 2.6.0",
  "vk-mem",
  "winit",
 ]

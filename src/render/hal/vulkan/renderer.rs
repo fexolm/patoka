@@ -44,6 +44,8 @@ pub struct Renderer {
 
     pub(crate) allocator: Allocator,
 
+    pub(crate) descriptor_pool: vk::DescriptorPool,
+
     window: Arc<Window>,
 
     frame_number: Cell<usize>,
@@ -380,6 +382,22 @@ impl Renderer {
 
             let allocator = Allocator::new(AllocatorCreateInfo::new(&instance, &device, physical_device)).unwrap();
 
+            let descriptor_pool = {
+                let pool_sizes = [
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 4096 },
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 4096 },
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 4096 },
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 4096 },
+                ];
+
+                let create_info = vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&pool_sizes)
+                    .max_sets(1000)
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
+
+                device.create_descriptor_pool(&create_info, None).unwrap()
+            };
+
             Ok(Arc::new(Self {
                 entry,
                 instance,
@@ -402,6 +420,7 @@ impl Renderer {
                 frame_number: Cell::new(0),
                 swapchain_image_idx: Cell::new(0),
                 allocator,
+                descriptor_pool,
             }))
         }
     }

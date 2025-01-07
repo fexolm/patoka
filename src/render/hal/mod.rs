@@ -29,3 +29,28 @@ pub struct CommandListCreateInfo {}
 pub struct SemaphoreCreateInfo {}
 
 pub struct FenceCreateInfo {}
+
+
+pub enum BindingType {
+    UniformBuffer,
+    StagingBuffer,
+    Texture,
+    Sampler,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy)]
+    pub struct ShaderStages: u8 {
+        const Vertex = 0x1;
+        const Fragment = 0x2;
+        const Compute = 0x4;
+    }
+}
+pub struct DescriptorSetBinding {
+    pub typ: BindingType,
+    pub binding: u32,
+    pub stage: ShaderStages,
+}
+pub struct DescriptorSetLayoutCreateInfo {
+    pub bindings: Vec<DescriptorSetBinding>,
+}
