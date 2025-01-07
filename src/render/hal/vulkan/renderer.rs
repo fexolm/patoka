@@ -10,7 +10,8 @@ use winit::raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
 use crate::render::hal;
-use crate::render::hal::{Error, RendererCreateInfo, Result};
+use crate::render::hal::{CommandList, CommandListCreateInfo, Error, RendererCreateInfo, Result};
+use crate::render::hal::vulkan::command_list::VulkanCommandList;
 
 pub struct VulkanRenderer<'w> {
     pub(crate) entry: Entry,
@@ -30,10 +31,16 @@ pub struct VulkanRenderer<'w> {
 
     pub(crate) swapchain_loader: swapchain::Device,
     pub(crate) swapchain: vk::SwapchainKHR,
+    pub(crate) swapchain_images: Vec<vk::Image>,
+    pub(crate) swapchain_imageviews: Vec<vk::ImageView>,
 
     pub(crate) device: Device,
 
+    pub(crate) command_pool: vk::CommandPool,
+
     window: &'w Window,
+
+    frame_number: usize,
 }
 impl From<vk::Result> for Error {
     fn from(res: vk::Result) -> Self {
@@ -196,30 +203,72 @@ unsafe fn select_physical_device(instance: &Instance, surface_loader: &surface::
         }).expect("Couldn't find suitable device."))
 }
 
+fn create_swapchain_image_views(
+    device: &Device,
+    swapchain_images: &[vk::Image],
+    format: vk::Format,
+) -> Vec<vk::ImageView> {
+    swapchain_images
+        .iter()
+        .map(|image| {
+            create_image_view(
+                device,
+                *image,
+                1,
+                format,
+                vk::ImageAspectFlags::COLOR,
+            ).unwrap()
+        })
+        .collect::<Vec<_>>()
+}
+fn create_image_view(
+    device: &Device,
+    image: vk::Image,
+    mip_levels: u32,
+    format: vk::Format,
+    aspect_mask: vk::ImageAspectFlags,
+) -> Result<vk::ImageView> {
+    let create_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask,
+            base_mip_level: 0,
+            level_count: mip_levels,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+
+    unsafe { Ok(device.create_image_view(&create_info, None)?) }
+}
+
 impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
     fn new(window: &'w Window, info: &RendererCreateInfo) -> Result<Box<Self>> {
         unsafe {
             let entry = Entry::linked();
 
-            let app_info = vk::ApplicationInfo::default()
-                .engine_name(c"Patoka Engine")
-                .application_name(c"Patoka App")
-                .application_version(vk::make_api_version(0, 1, 0, 0))
-                .engine_version(vk::make_api_version(0, 1, 0, 0))
-                .api_version(vk::make_api_version(0, 1, 3, 0));
+            let instance = {
+                let app_info = vk::ApplicationInfo::default()
+                    .engine_name(c"Patoka Engine")
+                    .application_name(c"Patoka App")
+                    .application_version(vk::make_api_version(0, 1, 0, 0))
+                    .engine_version(vk::make_api_version(0, 1, 0, 0))
+                    .api_version(vk::make_api_version(0, 1, 3, 0));
 
-            let create_flags = vk::InstanceCreateFlags::default();
+                let create_flags = vk::InstanceCreateFlags::default();
 
-            let enabled_layers = get_enabled_layers();
-            let enabled_extensions = get_enabled_extensions(&window);
+                let enabled_layers = get_enabled_layers();
+                let enabled_extensions = get_enabled_extensions(&window);
 
-            let create_info = vk::InstanceCreateInfo::default()
-                .application_info(&app_info)
-                .enabled_layer_names(&enabled_layers)
-                .enabled_extension_names(&enabled_extensions)
-                .flags(create_flags);
+                let create_info = vk::InstanceCreateInfo::default()
+                    .application_info(&app_info)
+                    .enabled_layer_names(&enabled_layers)
+                    .enabled_extension_names(&enabled_extensions)
+                    .flags(create_flags);
 
-            let instance = entry.create_instance(&create_info, None)?;
+                entry.create_instance(&create_info, None)?
+            };
 
             let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
                 .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
@@ -247,56 +296,69 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
 
             let SelectedPhysicalDevice { physical_device, graphics_family_idx, present_family_idx } = select_physical_device(&instance, &surface_loader, surface)?;
 
-            let device_extension_names_raw = [
-                swapchain::NAME.as_ptr(),
-            ];
+            let device = {
+                let device_extension_names_raw = [
+                    swapchain::NAME.as_ptr(),
+                ];
 
-            let features = vk::PhysicalDeviceFeatures {
-                shader_clip_distance: 1,
-                ..Default::default()
+                let features = vk::PhysicalDeviceFeatures {
+                    shader_clip_distance: 1,
+                    ..Default::default()
+                };
+
+                let priorities = [1.0];
+
+                let queue_infos: Vec<_> = [graphics_family_idx, present_family_idx].iter().map(|&idx| vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(idx)
+                    .queue_priorities(&priorities)
+                ).collect();
+
+                let create_info = vk::DeviceCreateInfo::default()
+                    .queue_create_infos(&queue_infos)
+                    .enabled_extension_names(&device_extension_names_raw)
+                    .enabled_features(&features);
+                instance
+                    .create_device(physical_device, &create_info, None)
+                    .unwrap()
             };
-
-            let priorities = [1.0];
-
-            let queue_infos: Vec<_> = [graphics_family_idx, present_family_idx].iter().map(|&idx| vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(idx)
-                .queue_priorities(&priorities)
-            ).collect();
-
-            let device_create_info = vk::DeviceCreateInfo::default()
-                .queue_create_infos(&queue_infos)
-                .enabled_extension_names(&device_extension_names_raw)
-                .enabled_features(&features);
-
-            let device = instance
-                .create_device(physical_device, &device_create_info, None)
-                .unwrap();
 
             let present_queue = device.get_device_queue(present_family_idx, 0);
             let graphics_queue = device.get_device_queue(graphics_family_idx, 0);
 
             let swapchain_loader = swapchain::Device::new(&instance, &device);
 
-            let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-                .surface(surface)
-                .min_image_count(3)
-                .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
-                .image_format(vk::Format::B8G8R8A8_UNORM)
-                .image_extent(vk::Extent2D {
-                    width: window.inner_size().width,
-                    height: window.inner_size().height,
-                })
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-                .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(vk::PresentModeKHR::FIFO)
-                .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-                .clipped(true)
-                .image_array_layers(1);
+            let swapchain = {
+                let create_info = vk::SwapchainCreateInfoKHR::default()
+                    .surface(surface)
+                    .min_image_count(3)
+                    .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+                    .image_format(vk::Format::B8G8R8A8_UNORM)
+                    .image_extent(vk::Extent2D {
+                        width: window.inner_size().width,
+                        height: window.inner_size().height,
+                    })
+                    .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                    .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                    .present_mode(vk::PresentModeKHR::FIFO)
+                    .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
+                    .clipped(true)
+                    .image_array_layers(1);
 
-            let swapchain = swapchain_loader
-                .create_swapchain(&swapchain_create_info, None)
-                .unwrap();
+                swapchain_loader
+                    .create_swapchain(&create_info, None)
+                    .unwrap()
+            };
+
+            let swapchain_images = swapchain_loader.get_swapchain_images(swapchain)?;
+            let swapchain_imageviews = create_swapchain_image_views(&device, &swapchain_images, vk::Format::B8G8R8A8_UNORM);
+
+            let command_pool = {
+                let create_info = vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(graphics_family_idx);
+                device.create_command_pool(&create_info, None)?
+            };
 
             Ok(Box::new(Self {
                 entry,
@@ -314,17 +376,31 @@ impl<'w> hal::Renderer<'w> for VulkanRenderer<'w> {
                 surface,
                 swapchain,
                 window,
+                swapchain_images,
+                swapchain_imageviews,
+                command_pool,
+                frame_number: 0,
             }))
         }
+    }
+
+    fn create_command_list<'r>(&'r self, create_info: &CommandListCreateInfo) -> Box<dyn CommandList + 'r> {
+        VulkanCommandList::new(self, create_info)
     }
 }
 
 impl<'w> Drop for VulkanRenderer<'w> {
     fn drop(&mut self) {
         unsafe {
+            self.device.device_wait_idle().unwrap();
+            self.device.destroy_command_pool(self.command_pool, None);
+            for &v in &self.swapchain_imageviews {
+                self.device.destroy_image_view(v, None);
+            }
+
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
-            self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
+            self.device.destroy_device(None);
             self.debug_utils_loader.destroy_debug_utils_messenger(self.debug_callback, None);
             self.instance.destroy_instance(None);
         }
