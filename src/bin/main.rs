@@ -2,12 +2,14 @@ extern crate patoka;
 
 use std::sync::Arc;
 
+use ash::vk;
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 
 use patoka::render::hal::*;
 use patoka::render::hal::RendererCreateInfo;
 use patoka::render::hal::vulkan::command_list::CommandList;
+use patoka::render::hal::vulkan::image::Texture;
 use patoka::render::hal::vulkan::renderer::Renderer;
 use patoka::render::hal::vulkan::sync::{Fence, Semaphore};
 
@@ -45,22 +47,32 @@ fn main() {
 
     let mut frame = 0;
 
+    let texture = {
+        let extent = vk::Extent3D { width: 800, height: 600, depth: 1 };
+        let usage = vk::ImageUsageFlags::TRANSFER_SRC
+            | vk::ImageUsageFlags::TRANSFER_DST
+            | vk::ImageUsageFlags::STORAGE
+            | vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        Texture::new(renderer.clone(), vk::Format::R16G16B16A16_SFLOAT, extent, usage, vk::ImageAspectFlags::COLOR)
+    };
+
     loop {
         render_fence.wait();
         render_fence.reset();
-
-        let img = renderer.acquire_next_framebuffer(&swapchain_semaphore);
+        
+        renderer.start_frame(&swapchain_semaphore);
 
         command_list.reset();
         command_list.begin();
 
-        command_list.flash_screen(&img, frame);
+        command_list.flash_screen(&texture, frame);
+        command_list.copy_to_framebuffer(&texture);
 
         command_list.end();
 
         renderer.submit(&command_list, &[&swapchain_semaphore], &[&render_semaphore], &render_fence);
 
-        renderer.present(&render_semaphore, &img);
+        renderer.present(&render_semaphore);
         frame += 1;
     }
 }

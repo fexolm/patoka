@@ -7,6 +7,7 @@ use std::sync::Arc;
 use ash::{Device, Entry, Instance, vk};
 use ash::ext::debug_utils;
 use ash::khr::{surface, swapchain};
+use vk_mem::{Allocator, AllocatorCreateInfo};
 use winit::error::OsError;
 use winit::raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
@@ -14,7 +15,6 @@ use winit::window::Window;
 use crate::render::hal::{Error, RendererCreateInfo, Result};
 use crate::render::hal::vulkan::command_list::CommandList;
 use crate::render::hal::vulkan::FRAME_OVERLAP;
-use crate::render::hal::vulkan::image::Framebuffer;
 use crate::render::hal::vulkan::sync::{Fence, Semaphore};
 
 pub struct Renderer {
@@ -42,9 +42,12 @@ pub struct Renderer {
 
     pub(crate) command_pool: vk::CommandPool,
 
+    pub(crate) allocator: Allocator,
+
     window: Arc<Window>,
 
     frame_number: Cell<usize>,
+    swapchain_image_idx: Cell<u32>,
 }
 impl From<vk::Result> for Error {
     fn from(res: vk::Result) -> Self {
@@ -349,8 +352,8 @@ impl Renderer {
                     .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
                     .image_format(vk::Format::B8G8R8A8_UNORM)
                     .image_extent(vk::Extent2D {
-                        width: window.inner_size().width,
-                        height: window.inner_size().height,
+                        width: 800,
+                        height: 600,
                     })
                     .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
                     .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -375,6 +378,8 @@ impl Renderer {
                 device.create_command_pool(&create_info, None)?
             };
 
+            let allocator = Allocator::new(AllocatorCreateInfo::new(&instance, &device, physical_device)).unwrap();
+
             Ok(Arc::new(Self {
                 entry,
                 instance,
@@ -395,6 +400,8 @@ impl Renderer {
                 swapchain_imageviews,
                 command_pool,
                 frame_number: Cell::new(0),
+                swapchain_image_idx: Cell::new(0),
+                allocator,
             }))
         }
     }
@@ -403,10 +410,10 @@ impl Renderer {
         self.frame_number.get()
     }
 
-    pub fn acquire_next_framebuffer(&self, signal_semaphore: &Semaphore) -> Framebuffer {
+    pub fn start_frame(&self, signal_semaphore: &Semaphore) {
         unsafe {
             let (idx, _) = self.swapchain_loader.acquire_next_image(self.swapchain, 1000000000, signal_semaphore.get_raw(), vk::Fence::null()).unwrap();
-            Framebuffer { image_view: self.swapchain_imageviews[idx as usize], image: self.swapchain_images[idx as usize], idx }
+            self.swapchain_image_idx.replace(idx);
         }
     }
 
@@ -418,6 +425,10 @@ impl Renderer {
                 .device_index(0)
                 .value(1)
         }
+    }
+
+    pub(crate) fn get_current_swapchain_img(&self) -> vk::Image {
+        self.swapchain_images[self.swapchain_image_idx.get() as usize]
     }
 
     pub fn submit(&self, command_list: &CommandList, wait_semaphores: &[&Semaphore], signal_semaphores: &[&Semaphore], signal_fence: &Fence) {
@@ -436,18 +447,18 @@ impl Renderer {
         unsafe { self.device.queue_submit2(self.graphics_queue, &submit_infos, signal_fence.get_raw()).unwrap() }
     }
 
-    pub fn present(&self, wait_semaphore: &Semaphore, img: &Framebuffer) {
+    pub fn present(&self, wait_semaphore: &Semaphore) {
         unsafe {
             let swapchains = [self.swapchain];
             let wait_semaphores = [wait_semaphore.get_raw()];
-            let image_indices = [img.idx];
+            let image_indices = [self.swapchain_image_idx.get()];
             let present_info = vk::PresentInfoKHR::default()
                 .swapchains(&swapchains)
                 .wait_semaphores(&wait_semaphores)
                 .image_indices(&image_indices);
             self.swapchain_loader.queue_present(self.graphics_queue, &present_info).unwrap();
+            self.frame_number.replace((self.current_frame() + 1) % FRAME_OVERLAP);
         }
-        self.frame_number.replace((self.current_frame() + 1) % FRAME_OVERLAP);
     }
 }
 

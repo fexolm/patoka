@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use ash::vk;
+use ash::vk::Offset3D;
 
 use crate::render::hal::CommandListCreateInfo;
 use crate::render::hal::vulkan::FRAME_OVERLAP;
-use crate::render::hal::vulkan::image::Image;
+use crate::render::hal::vulkan::image::Texture;
 use crate::render::hal::vulkan::renderer::Renderer;
 
 pub struct CommandList {
@@ -53,7 +54,7 @@ impl CommandList {
             .layer_count(vk::REMAINING_ARRAY_LAYERS)
     }
 
-    fn transition_image_layout(&self, image: &dyn Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
+    fn transition_image_layout(&self, image: vk::Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
         unsafe {
             let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
                 vk::ImageAspectFlags::DEPTH
@@ -69,7 +70,7 @@ impl CommandList {
                 .old_layout(old_layout)
                 .new_layout(new_layout)
                 .subresource_range(Self::subresource_range(aspect_mask))
-                .image(image.get_image());
+                .image(image);
 
             let barriers = [image_barrier];
 
@@ -80,14 +81,54 @@ impl CommandList {
         }
     }
 
-    pub fn flash_screen(&self, image: &dyn Image, frame_num: usize) {
-        self.transition_image_layout(image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+    fn copy_image_to_image(&self, source: vk::Image, dest: vk::Image, src_size: vk::Extent2D, dst_size: vk::Extent2D) {
+        let blit_regions = [vk::ImageBlit2::default()
+            .src_offsets([
+                Offset3D::default(),
+                Offset3D { x: src_size.width as i32, y: src_size.height as i32, z: 1 }
+            ])
+            .dst_offsets([
+                Offset3D::default(),
+                Offset3D { x: dst_size.width as i32, y: dst_size.height as i32, z: 1 }
+            ])
+            .src_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_array_layer: 0,
+                layer_count: 1,
+                mip_level: 0,
+            })
+            .dst_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_array_layer: 0,
+                layer_count: 1,
+                mip_level: 0,
+            })];
+
+        let blit_info = vk::BlitImageInfo2::default()
+            .dst_image(dest)
+            .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_image(source)
+            .src_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .filter(vk::Filter::LINEAR)
+            .regions(&blit_regions);
+
+        unsafe { self.renderer.device.cmd_blit_image2(self.get_raw(), &blit_info) }
+    }
+
+    pub fn flash_screen(&self, texture: &Texture, frame_num: usize) {
+        self.transition_image_layout(texture.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
         let flash = ((frame_num as f32) / 120f32).sin().abs();
         let clear_value = vk::ClearColorValue { float32: [0f32, 0f32, flash, 1f32] };
         unsafe {
-            self.renderer.device.cmd_clear_color_image(self.get_raw(), image.get_image(), vk::ImageLayout::GENERAL,
+            self.renderer.device.cmd_clear_color_image(self.get_raw(), texture.image, vk::ImageLayout::GENERAL,
                                                        &clear_value, &[Self::subresource_range(vk::ImageAspectFlags::COLOR)])
         };
-        self.transition_image_layout(image, vk::ImageLayout::GENERAL, vk::ImageLayout::PRESENT_SRC_KHR);
+    }
+
+    pub fn copy_to_framebuffer(&self, texture: &Texture) {
+        self.transition_image_layout(texture.image, vk::ImageLayout::GENERAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        self.transition_image_layout(self.renderer.get_current_swapchain_img(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        self.copy_image_to_image(texture.image, self.renderer.get_current_swapchain_img(), vk::Extent2D { width: 800, height: 600 }, vk::Extent2D { width: 800, height: 600 });
+        self.transition_image_layout(self.renderer.get_current_swapchain_img(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR);
     }
 }
