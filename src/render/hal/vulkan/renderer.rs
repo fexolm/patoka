@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::ffi;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Arc;
@@ -10,10 +11,13 @@ use winit::error::OsError;
 use winit::raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
-use crate::render::hal::{CommandListCreateInfo, Error, RendererCreateInfo, Result};
-use crate::render::hal::vulkan::command_list::VulkanCommandList;
+use crate::render::hal::{Error, RendererCreateInfo, Result};
+use crate::render::hal::vulkan::command_list::CommandList;
+use crate::render::hal::vulkan::FRAME_OVERLAP;
+use crate::render::hal::vulkan::image::Framebuffer;
+use crate::render::hal::vulkan::sync::{Fence, Semaphore};
 
-pub struct VulkanRenderer {
+pub struct Renderer {
     pub(crate) entry: Entry,
     pub(crate) instance: Instance,
     pub(crate) debug_utils_loader: debug_utils::Instance,
@@ -40,7 +44,7 @@ pub struct VulkanRenderer {
 
     window: Arc<Window>,
 
-    frame_number: usize,
+    frame_number: Cell<usize>,
 }
 impl From<vk::Result> for Error {
     fn from(res: vk::Result) -> Self {
@@ -243,7 +247,7 @@ fn create_image_view(
     unsafe { Ok(device.create_image_view(&create_info, None)?) }
 }
 
-impl VulkanRenderer {
+impl Renderer {
     pub fn new(window: Arc<Window>, info: &RendererCreateInfo) -> Result<Arc<Self>> {
         unsafe {
             let entry = Entry::linked();
@@ -306,6 +310,17 @@ impl VulkanRenderer {
                     ..Default::default()
                 };
 
+                let mut features2 = vk::PhysicalDeviceFeatures2::default()
+                    .features(features);
+                let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+                    .descriptor_indexing(true)
+                    .buffer_device_address(true);
+                let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
+                    .synchronization2(true)
+                    .dynamic_rendering(true);
+                features2.p_next = &mut features12 as *mut _ as *mut c_void;
+                features12.p_next = &mut features13 as *mut _ as *mut c_void;
+
                 let priorities = [1.0];
 
                 let queue_infos: Vec<_> = [graphics_family_idx, present_family_idx].iter().map(|&idx| vk::DeviceQueueCreateInfo::default()
@@ -316,7 +331,7 @@ impl VulkanRenderer {
                 let create_info = vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_infos)
                     .enabled_extension_names(&device_extension_names_raw)
-                    .enabled_features(&features);
+                    .push_next(&mut features2);
                 instance
                     .create_device(physical_device, &create_info, None)
                     .unwrap()
@@ -337,7 +352,7 @@ impl VulkanRenderer {
                         width: window.inner_size().width,
                         height: window.inner_size().height,
                     })
-                    .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                    .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
                     .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
                     .present_mode(vk::PresentModeKHR::FIFO)
@@ -379,17 +394,64 @@ impl VulkanRenderer {
                 swapchain_images,
                 swapchain_imageviews,
                 command_pool,
-                frame_number: 0,
+                frame_number: Cell::new(0),
             }))
         }
     }
 
-    pub fn create_command_list(self: &Arc<Self>, create_info: &CommandListCreateInfo) -> VulkanCommandList {
-        VulkanCommandList::new(self.clone(), create_info)
+    pub(crate) fn current_frame(&self) -> usize {
+        self.frame_number.get()
+    }
+
+    pub fn acquire_next_framebuffer(&self, signal_semaphore: &Semaphore) -> Framebuffer {
+        unsafe {
+            let (idx, _) = self.swapchain_loader.acquire_next_image(self.swapchain, 1000000000, signal_semaphore.get_raw(), vk::Fence::null()).unwrap();
+            Framebuffer { image_view: self.swapchain_imageviews[idx as usize], image: self.swapchain_images[idx as usize], idx }
+        }
+    }
+
+    fn semaphore_submit_info(semaphore: &Semaphore) -> vk::SemaphoreSubmitInfo {
+        unsafe {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore.get_raw())
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .device_index(0)
+                .value(1)
+        }
+    }
+
+    pub fn submit(&self, command_list: &CommandList, wait_semaphores: &[&Semaphore], signal_semaphores: &[&Semaphore], signal_fence: &Fence) {
+        let cl_submit_infos = [vk::CommandBufferSubmitInfo::default()
+            .command_buffer(command_list.get_raw())
+            .device_mask(0)];
+
+        let wait_semaphore_infos = wait_semaphores.iter().map(|s| Self::semaphore_submit_info(s)).collect::<Vec<_>>();
+        let signal_semaphore_infos = signal_semaphores.iter().map(|s| Self::semaphore_submit_info(s)).collect::<Vec<_>>();
+
+        let submit_infos = [vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_semaphore_infos)
+            .signal_semaphore_infos(&signal_semaphore_infos)
+            .command_buffer_infos(&cl_submit_infos)];
+
+        unsafe { self.device.queue_submit2(self.graphics_queue, &submit_infos, signal_fence.get_raw()).unwrap() }
+    }
+
+    pub fn present(&self, wait_semaphore: &Semaphore, img: &Framebuffer) {
+        unsafe {
+            let swapchains = [self.swapchain];
+            let wait_semaphores = [wait_semaphore.get_raw()];
+            let image_indices = [img.idx];
+            let present_info = vk::PresentInfoKHR::default()
+                .swapchains(&swapchains)
+                .wait_semaphores(&wait_semaphores)
+                .image_indices(&image_indices);
+            self.swapchain_loader.queue_present(self.graphics_queue, &present_info).unwrap();
+        }
+        self.frame_number.replace((self.current_frame() + 1) % FRAME_OVERLAP);
     }
 }
 
-impl Drop for VulkanRenderer {
+impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
