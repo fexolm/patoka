@@ -485,6 +485,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            self.device.destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_command_pool(self.command_pool, None);
             for &v in &self.swapchain_imageviews {
                 self.device.destroy_image_view(v, None);

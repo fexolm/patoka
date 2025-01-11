@@ -4,6 +4,7 @@ use std::sync::Arc;
 use ash::vk;
 
 use crate::render::hal::{BindingType, DescriptorSetLayoutCreateInfo, ShaderStages};
+use crate::render::hal::vulkan::image::Texture;
 use crate::render::hal::vulkan::renderer::Renderer;
 
 pub struct DescriptorSetLayout {
@@ -36,7 +37,7 @@ fn convert_shader_stage(stage: ShaderStages) -> vk::ShaderStageFlags {
 }
 
 impl DescriptorSetLayout {
-    pub fn new(renderer: Arc<Renderer>, create_info: &DescriptorSetLayoutCreateInfo) -> Self {
+    pub fn new(renderer: Arc<Renderer>, create_info: &DescriptorSetLayoutCreateInfo) -> Arc<Self> {
         let bindings = create_info.bindings.iter().map(|b| {
             vk::DescriptorSetLayoutBinding {
                 binding: b.binding,
@@ -56,7 +57,7 @@ impl DescriptorSetLayout {
 
         let layout = unsafe { renderer.device.create_descriptor_set_layout(&layout_create_info, None).unwrap() };
 
-        DescriptorSetLayout { layout, renderer }
+        Arc::new(DescriptorSetLayout { layout, renderer })
     }
 }
 
@@ -66,8 +67,42 @@ impl Drop for DescriptorSetLayout {
     }
 }
 
-struct DescriptorSet {}
+pub struct DescriptorSet {
+    pub(crate) descriptor_set: vk::DescriptorSet,
+
+    renderer: Arc<Renderer>,
+}
 
 impl DescriptorSet {
-    // pub fn new(renderer: Arc<Renderer>) -> Self {}
+    pub fn new(renderer: Arc<Renderer>, layout: &DescriptorSetLayout) -> Self {
+        let layouts = [layout.layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(renderer.descriptor_pool)
+            .set_layouts(&layouts);
+        let descriptor_set = unsafe { renderer.device.allocate_descriptor_sets(&alloc_info).unwrap()[0] };
+
+        DescriptorSet { descriptor_set, renderer }
+    }
+
+    pub fn write_texture(&self, binding: u32, texture: &Texture) {
+        let img_infos = [vk::DescriptorImageInfo::default()
+            .image_view(texture.image_view)
+            .image_layout(vk::ImageLayout::GENERAL)];
+
+        let writes = [vk::WriteDescriptorSet::default()
+            .dst_binding(binding)
+            .dst_set(self.descriptor_set)
+            .descriptor_count(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .image_info(&img_infos)];
+
+        unsafe { self.renderer.device.update_descriptor_sets(&writes, &[]); }
+    }
+}
+
+impl Drop for DescriptorSet {
+    fn drop(&mut self) {
+        let sets = [self.descriptor_set];
+        unsafe { self.renderer.device.free_descriptor_sets(self.renderer.descriptor_pool, &sets).unwrap(); }
+    }
 }

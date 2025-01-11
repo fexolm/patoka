@@ -9,6 +9,7 @@ use winit::window::WindowBuilder;
 use patoka::render::hal::*;
 use patoka::render::hal::RendererCreateInfo;
 use patoka::render::hal::vulkan::command_list::CommandList;
+use patoka::render::hal::vulkan::descriptor_set::{DescriptorSet, DescriptorSetLayout};
 use patoka::render::hal::vulkan::image::Texture;
 use patoka::render::hal::vulkan::renderer::Renderer;
 use patoka::render::hal::vulkan::sync::{Fence, Semaphore};
@@ -56,10 +57,24 @@ fn main() {
         Texture::new(renderer.clone(), vk::Format::R16G16B16A16_SFLOAT, extent, usage, vk::ImageAspectFlags::COLOR)
     };
 
+    let draw_image_descriptor_layout = {
+        let create_info = DescriptorSetLayoutCreateInfo {
+            bindings: vec![DescriptorSetBinding {
+                stage: ShaderStages::Compute,
+                typ: BindingType::Texture,
+                binding: 0,
+            }],
+        };
+        DescriptorSetLayout::new(renderer.clone(), &create_info)
+    };
+
+    let draw_image_descriptor_set = DescriptorSet::new(renderer.clone(), &draw_image_descriptor_layout);
+
+
     loop {
         render_fence.wait();
         render_fence.reset();
-        
+
         renderer.start_frame(&swapchain_semaphore);
 
         command_list.reset();
