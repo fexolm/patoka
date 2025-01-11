@@ -253,7 +253,7 @@ fn create_image_view(
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, info: &RendererCreateInfo) -> Result<Arc<Self>> {
+    pub fn new(window: Arc<Window>, info: RendererCreateInfo) -> Result<Arc<Self>> {
         unsafe {
             let entry = Entry::linked();
 
@@ -431,7 +431,7 @@ impl Renderer {
 
     pub fn start_frame(&self, signal_semaphore: &Semaphore) {
         unsafe {
-            let (idx, _) = self.swapchain_loader.acquire_next_image(self.swapchain, 1000000000, signal_semaphore.get_raw(), vk::Fence::null()).unwrap();
+            let (idx, _) = self.swapchain_loader.acquire_next_image(self.swapchain, 1000000000, signal_semaphore.get_current(), vk::Fence::null()).unwrap();
             self.swapchain_image_idx.replace(idx);
         }
     }
@@ -439,7 +439,7 @@ impl Renderer {
     fn semaphore_submit_info(semaphore: &Semaphore) -> vk::SemaphoreSubmitInfo {
         unsafe {
             vk::SemaphoreSubmitInfo::default()
-                .semaphore(semaphore.get_raw())
+                .semaphore(semaphore.get_current())
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 .device_index(0)
                 .value(1)
@@ -452,7 +452,7 @@ impl Renderer {
 
     pub fn submit(&self, command_list: &CommandList, wait_semaphores: &[&Semaphore], signal_semaphores: &[&Semaphore], signal_fence: &Fence) {
         let cl_submit_infos = [vk::CommandBufferSubmitInfo::default()
-            .command_buffer(command_list.get_raw())
+            .command_buffer(command_list.get_current())
             .device_mask(0)];
 
         let wait_semaphore_infos = wait_semaphores.iter().map(|s| Self::semaphore_submit_info(s)).collect::<Vec<_>>();
@@ -463,13 +463,13 @@ impl Renderer {
             .signal_semaphore_infos(&signal_semaphore_infos)
             .command_buffer_infos(&cl_submit_infos)];
 
-        unsafe { self.device.queue_submit2(self.graphics_queue, &submit_infos, signal_fence.get_raw()).unwrap() }
+        unsafe { self.device.queue_submit2(self.graphics_queue, &submit_infos, signal_fence.get_current()).unwrap() }
     }
 
     pub fn present(&self, wait_semaphore: &Semaphore) {
         unsafe {
             let swapchains = [self.swapchain];
-            let wait_semaphores = [wait_semaphore.get_raw()];
+            let wait_semaphores = [wait_semaphore.get_current()];
             let image_indices = [self.swapchain_image_idx.get()];
             let present_info = vk::PresentInfoKHR::default()
                 .swapchains(&swapchains)

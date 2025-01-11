@@ -4,6 +4,7 @@ use std::sync::Arc;
 use ash::vk;
 
 use crate::render::hal::{BindingType, DescriptorSetLayoutCreateInfo, ShaderStages};
+use crate::render::hal::vulkan::FRAME_OVERLAP;
 use crate::render::hal::vulkan::image::Texture;
 use crate::render::hal::vulkan::renderer::Renderer;
 
@@ -13,11 +14,11 @@ pub struct DescriptorSetLayout {
     renderer: Arc<Renderer>,
 }
 
-fn convert_binding_type(binding: &BindingType) -> vk::DescriptorType {
+fn convert_binding_type(binding: BindingType) -> vk::DescriptorType {
     match binding {
         BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
-        BindingType::StagingBuffer => vk::DescriptorType::STORAGE_BUFFER,
-        BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,
+        BindingType::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+        BindingType::Texture => vk::DescriptorType::STORAGE_IMAGE,
         BindingType::Sampler => vk::DescriptorType::SAMPLER,
     }
 }
@@ -37,11 +38,11 @@ fn convert_shader_stage(stage: ShaderStages) -> vk::ShaderStageFlags {
 }
 
 impl DescriptorSetLayout {
-    pub fn new(renderer: Arc<Renderer>, create_info: &DescriptorSetLayoutCreateInfo) -> Arc<Self> {
+    pub fn new(renderer: Arc<Renderer>, create_info: DescriptorSetLayoutCreateInfo) -> Arc<Self> {
         let bindings = create_info.bindings.iter().map(|b| {
             vk::DescriptorSetLayoutBinding {
                 binding: b.binding,
-                descriptor_type: convert_binding_type(&b.typ),
+                descriptor_type: convert_binding_type(b.typ),
                 descriptor_count: 1,
                 stage_flags: convert_shader_stage(b.stage),
                 p_immutable_samplers: ptr::null(),
@@ -68,20 +69,27 @@ impl Drop for DescriptorSetLayout {
 }
 
 pub struct DescriptorSet {
-    pub(crate) descriptor_set: vk::DescriptorSet,
+    descriptor_sets: Vec<vk::DescriptorSet>,
 
     renderer: Arc<Renderer>,
+    layout: Arc<DescriptorSetLayout>,
 }
 
 impl DescriptorSet {
-    pub fn new(renderer: Arc<Renderer>, layout: &DescriptorSetLayout) -> Self {
-        let layouts = [layout.layout];
+    pub fn new(renderer: Arc<Renderer>, layout: Arc<DescriptorSetLayout>) -> Arc<Self> {
+        let layouts = (0..FRAME_OVERLAP)
+            .map(|_| layout.layout)
+            .collect::<Vec<_>>();
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(renderer.descriptor_pool)
             .set_layouts(&layouts);
-        let descriptor_set = unsafe { renderer.device.allocate_descriptor_sets(&alloc_info).unwrap()[0] };
+        let descriptor_sets = unsafe { renderer.device.allocate_descriptor_sets(&alloc_info).unwrap() };
 
-        DescriptorSet { descriptor_set, renderer }
+        Arc::new(DescriptorSet { descriptor_sets, renderer, layout })
+    }
+
+    pub(crate) fn get_current(&self) -> vk::DescriptorSet {
+        self.descriptor_sets[self.renderer.current_frame()]
     }
 
     pub fn write_texture(&self, binding: u32, texture: &Texture) {
@@ -91,7 +99,7 @@ impl DescriptorSet {
 
         let writes = [vk::WriteDescriptorSet::default()
             .dst_binding(binding)
-            .dst_set(self.descriptor_set)
+            .dst_set(self.get_current())
             .descriptor_count(1)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&img_infos)];
@@ -102,7 +110,6 @@ impl DescriptorSet {
 
 impl Drop for DescriptorSet {
     fn drop(&mut self) {
-        let sets = [self.descriptor_set];
-        unsafe { self.renderer.device.free_descriptor_sets(self.renderer.descriptor_pool, &sets).unwrap(); }
+        unsafe { self.renderer.device.free_descriptor_sets(self.renderer.descriptor_pool, &self.descriptor_sets).unwrap(); }
     }
 }

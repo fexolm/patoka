@@ -1,5 +1,11 @@
+use std::ffi::CStr;
 use std::fmt;
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
+
+use crate::render::hal::vulkan::descriptor_set::DescriptorSetLayout;
+use crate::render::hal::vulkan::pipeline::PipelineLayout;
+use crate::render::hal::vulkan::shader::Shader;
 
 pub mod vulkan;
 
@@ -30,10 +36,10 @@ pub struct SemaphoreCreateInfo {}
 
 pub struct FenceCreateInfo {}
 
-
+#[derive(Clone, Copy)]
 pub enum BindingType {
     UniformBuffer,
-    StagingBuffer,
+    StorageBuffer,
     Texture,
     Sampler,
 }
@@ -53,4 +59,18 @@ pub struct DescriptorSetBinding {
 }
 pub struct DescriptorSetLayoutCreateInfo {
     pub bindings: Vec<DescriptorSetBinding>,
+}
+
+pub struct ShaderCreateInfo {
+    pub code: &'static [u32],
+}
+
+pub struct PipelineLayoutCreateInfo {
+    pub sets: Vec<Arc<DescriptorSetLayout>>,
+}
+
+pub struct ComputePipelineCreateInfo {
+    pub shader: Arc<Shader>,
+    pub pipeline_layout: Arc<PipelineLayout>,
+    pub entrypoint: &'static CStr,
 }

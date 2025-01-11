@@ -4,16 +4,20 @@ use ash::vk;
 use ash::vk::Offset3D;
 
 use crate::render::hal::CommandListCreateInfo;
+use crate::render::hal::vulkan::descriptor_set::DescriptorSet;
 use crate::render::hal::vulkan::FRAME_OVERLAP;
 use crate::render::hal::vulkan::image::Texture;
+use crate::render::hal::vulkan::pipeline::{ComputePipeline, PipelineLayout};
 use crate::render::hal::vulkan::renderer::Renderer;
 
 pub struct CommandList {
     command_buffers: [vk::CommandBuffer; FRAME_OVERLAP],
     renderer: Arc<Renderer>,
+
+    owned_resources: Vec<Arc<dyn Drop>>,
 }
 impl CommandList {
-    pub fn new(renderer: Arc<Renderer>, info: &CommandListCreateInfo) -> Self {
+    pub fn new(renderer: Arc<Renderer>, info: CommandListCreateInfo) -> Self {
         let command_buffers = {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(renderer.command_pool)
@@ -23,26 +27,26 @@ impl CommandList {
             unsafe { renderer.device.allocate_command_buffers(&alloc_info).unwrap().as_slice().try_into().unwrap() }
         };
 
-        Self { command_buffers, renderer }
+        Self { command_buffers, renderer, owned_resources: Vec::new() }
     }
 
-    pub(crate) fn get_raw(&self) -> vk::CommandBuffer {
+    pub(crate) fn get_current(&self) -> vk::CommandBuffer {
         let frame = self.renderer.current_frame();
         self.command_buffers[frame]
     }
 
     pub fn reset(&self) {
         let reset_flags = vk::CommandBufferResetFlags::default();
-        unsafe { self.renderer.device.reset_command_buffer(self.get_raw(), reset_flags).unwrap() };
+        unsafe { self.renderer.device.reset_command_buffer(self.get_current(), reset_flags).unwrap() };
     }
 
     pub fn begin(&self) {
         let info = vk::CommandBufferBeginInfo::default();
-        unsafe { self.renderer.device.begin_command_buffer(self.get_raw(), &info).unwrap(); }
+        unsafe { self.renderer.device.begin_command_buffer(self.get_current(), &info).unwrap(); }
     }
 
     pub fn end(&self) {
-        unsafe { self.renderer.device.end_command_buffer(self.get_raw()).unwrap() };
+        unsafe { self.renderer.device.end_command_buffer(self.get_current()).unwrap() };
     }
 
     fn subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
@@ -77,8 +81,12 @@ impl CommandList {
             let dependency_info = vk::DependencyInfo::default()
                 .image_memory_barriers(&barriers);
 
-            self.renderer.device.cmd_pipeline_barrier2(self.get_raw(), &dependency_info);
+            self.renderer.device.cmd_pipeline_barrier2(self.get_current(), &dependency_info);
         }
+    }
+
+    pub fn transition_texture_layout(&self, texture: &Texture, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
+        self.transition_image_layout(texture.image, old_layout, new_layout);
     }
 
     fn copy_image_to_image(&self, source: vk::Image, dest: vk::Image, src_size: vk::Extent2D, dst_size: vk::Extent2D) {
@@ -112,17 +120,7 @@ impl CommandList {
             .filter(vk::Filter::LINEAR)
             .regions(&blit_regions);
 
-        unsafe { self.renderer.device.cmd_blit_image2(self.get_raw(), &blit_info) }
-    }
-
-    pub fn flash_screen(&self, texture: &Texture, frame_num: usize) {
-        self.transition_image_layout(texture.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
-        let flash = ((frame_num as f32) / 120f32).sin().abs();
-        let clear_value = vk::ClearColorValue { float32: [0f32, 0f32, flash, 1f32] };
-        unsafe {
-            self.renderer.device.cmd_clear_color_image(self.get_raw(), texture.image, vk::ImageLayout::GENERAL,
-                                                       &clear_value, &[Self::subresource_range(vk::ImageAspectFlags::COLOR)])
-        };
+        unsafe { self.renderer.device.cmd_blit_image2(self.get_current(), &blit_info) }
     }
 
     pub fn copy_to_framebuffer(&self, texture: &Texture) {
@@ -130,5 +128,30 @@ impl CommandList {
         self.transition_image_layout(self.renderer.get_current_swapchain_img(), vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         self.copy_image_to_image(texture.image, self.renderer.get_current_swapchain_img(), vk::Extent2D { width: 800, height: 600 }, vk::Extent2D { width: 800, height: 600 });
         self.transition_image_layout(self.renderer.get_current_swapchain_img(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR);
+    }
+
+    pub fn bind_compute_pipeline(&mut self, pipeline: Arc<ComputePipeline>) {
+        unsafe { self.renderer.device.cmd_bind_pipeline(self.get_current(), vk::PipelineBindPoint::COMPUTE, pipeline.pipeline) };
+        self.owned_resources.push(pipeline);
+    }
+
+    pub fn bind_descriptor_set(&mut self, pipeline_layout: Arc<PipelineLayout>, descriptor_set: Arc<DescriptorSet>) {
+        unsafe {
+            self.renderer.device.cmd_bind_descriptor_sets(
+                self.get_current(),
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout.layout,
+                0,
+                &[descriptor_set.get_current()],
+                &[])
+        };
+        self.owned_resources.push(pipeline_layout);
+        self.owned_resources.push(descriptor_set);
+    }
+
+    pub fn dispatch_compute_pipeline(&self, x: u32, y: u32, z: u32) {
+        unsafe {
+            self.renderer.device.cmd_dispatch(self.get_current(), x, y, z);
+        };
     }
 }

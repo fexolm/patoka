@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::render::hal::{FenceCreateInfo, SemaphoreCreateInfo};
 use crate::render::hal::vulkan::FRAME_OVERLAP;
 use crate::render::hal::vulkan::renderer::Renderer;
 
@@ -12,7 +11,7 @@ pub struct Semaphore {
 }
 
 impl Semaphore {
-    pub fn new(renderer: Arc<Renderer>, create_info: &SemaphoreCreateInfo) -> Self {
+    pub fn new(renderer: Arc<Renderer>) -> Self {
         let info = vk::SemaphoreCreateInfo::default();
         let semaphores = (0..FRAME_OVERLAP)
             .map(|_| unsafe { renderer.device.create_semaphore(&info, None).unwrap() })
@@ -24,7 +23,7 @@ impl Semaphore {
         }
     }
 
-    pub(crate) unsafe fn get_raw(&self) -> vk::Semaphore {
+    pub(crate) unsafe fn get_current(&self) -> vk::Semaphore {
         self.semaphores[self.renderer.current_frame()]
     }
 }
@@ -51,7 +50,7 @@ impl Drop for Fence {
 }
 
 impl Fence {
-    pub fn new(renderer: Arc<Renderer>, create_info: &FenceCreateInfo) -> Self {
+    pub fn new(renderer: Arc<Renderer>) -> Self {
         let info = vk::FenceCreateInfo::default()
             .flags(vk::FenceCreateFlags::SIGNALED);
 
@@ -65,7 +64,7 @@ impl Fence {
         }
     }
 
-    pub(crate) unsafe fn get_raw(&self) -> vk::Fence {
+    pub(crate) unsafe fn get_current(&self) -> vk::Fence {
         self.fences[self.renderer.current_frame()]
     }
 
